@@ -5,15 +5,33 @@
  * Reads module-flags.json (written by install-custom-modules.js scan) and:
  *   - Merges module deps into app/build.gradle
  *   - Merges module manifest fragments into AndroidManifest.xml
- *   - Skips default MainActivity if a module overrides it
+ *   - Skips default MainActivity if native mode or a custom module overrides it
  *   - Generates adaptive icons for Android 8+
  */
 const fs = require("fs");
 const path = require("path");
 const { execSync } = require("child_process");
 
-const configPath = process.argv[2] || "config.json";
+const configPath = process.argv || "config.json";
+if (!fs.existsSync(configPath)) {
+  console.error(`Config file not found at: ${configPath}`);
+  process.exit(1);
+}
+
 const cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
+
+// ─── SAFE CONFIG DEFAULTS ───
+cfg.packageName = (cfg.packageName || "com.example.myapp").trim();
+cfg.appName = cfg.appName || "My App";
+cfg.versionCode = parseInt(cfg.versionCode, 10) || 1;
+cfg.versionName = cfg.versionName || "1.0.0";
+cfg.appMode = cfg.appMode || "hybrid";
+cfg.websiteUrl = cfg.websiteUrl || "https://example.com";
+
+// Safe Theme Color (Ensures leading '#' exists and prevents crashes)
+const themeColor = (cfg.themeColor && String(cfg.themeColor).trim().startsWith("#"))
+  ? String(cfg.themeColor).trim()
+  : (cfg.themeColor ? `#${String(cfg.themeColor).trim()}` : "#1f6feb");
 
 const ROOT = path.resolve("android-project");
 const pkgPath = cfg.packageName.split(".").join("/");
@@ -54,24 +72,15 @@ const moduleAppManifest = moduleFlags.appManifest || [];
 const moduleOverridesMainActivity = moduleFlags.overrideMainActivity === true;
 const isNativeMode = cfg.appMode === "native";
 
-// Native mode does NOT mean that the default launcher should be removed.
-// The default MainActivity is only skipped when a custom module actually
-// provides a launcher activity. This prevents the build from producing a
-// manifest with zero MAIN/LAUNCHER activities.
+// Check if a custom module provides its own MAIN/LAUNCHER intent filter
 const moduleHasLauncherActivity = (moduleAppManifest || []).some((entry) =>
   /android\:name\s*=/.test(entry) &&
   /android\.intent\.action\.MAIN/.test(entry) &&
   /android\.intent\.category\.LAUNCHER/.test(entry)
 );
 
-const skipDefaultMainActivity = moduleOverridesMainActivity && moduleHasLauncherActivity;
-
-if (moduleOverridesMainActivity && !moduleHasLauncherActivity) {
-  console.warn(
-    "⚠ Module requested MainActivity override but provides no MAIN/LAUNCHER activity; " +
-    "falling back to the generated default launcher."
-  );
-}
+// FIX: Native mode-এ অথবা Custom module থাকলে ডিফল্ট WebView MainActivity বাদ দেওয়া হবে
+const skipDefaultMainActivity = isNativeMode || (moduleOverridesMainActivity && moduleHasLauncherActivity);
 
 console.log("appMode:", cfg.appMode);
 console.log("isNativeMode:", isNativeMode);
@@ -79,10 +88,10 @@ console.log("moduleOverridesMainActivity:", moduleOverridesMainActivity);
 console.log("moduleHasLauncherActivity:", moduleHasLauncherActivity);
 console.log("skipDefaultMainActivity:", skipDefaultMainActivity);
 
-// Clean
+// Clean previous project build
 fs.rmSync(ROOT, { recursive: true, force: true });
 
-// Dirs
+// Create required directories
 for (const d of [
   javaDir,
   path.join(resDir, "values"),
@@ -329,6 +338,8 @@ if (cfg.enableReadMediaAudio) {
 if (cfg.enableStorage || cfg.enableFileUpload) {
   mp.push(`<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />`);
   mp.push(`<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />`);
+  // Android 13+ storage support
+  mp.push(`<uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />`);
   rp.push("android.permission.READ_EXTERNAL_STORAGE");
 }
 
@@ -432,7 +443,7 @@ const orientationAttr =
   : 'android:screenOrientation="unspecified"';
 
 let launcherBlock;
-if (skipDefaultMainActivity) {
+if (moduleHasLauncherActivity) {
   launcherBlock = `<!-- Launcher activity comes from custom module -->`;
 } else {
   launcherBlock = `
@@ -452,19 +463,19 @@ if (skipDefaultMainActivity) {
 const basePermNames = new Set();
 for (const p of mp) {
   const m = p.match(/android:name="([^"]+)"/);
-  if (m) basePermNames.add(m[1]);
+  if (m) basePermNames.add(m);
 }
 const baseFeatNames = new Set();
 for (const f of mf) {
   const m = f.match(/android:name="([^"]+)"/);
-  if (m) baseFeatNames.add(m[1]);
+  if (m) baseFeatNames.add(m);
 }
 
 const extraRoot = [];
 for (const elem of moduleRootManifest) {
   const nameM = elem.match(/android:name="([^"]+)"/);
   if (!nameM) { extraRoot.push(elem); continue; }
-  const name = nameM[1];
+  const name = nameM;
   if (elem.startsWith("<uses-permission")) {
     if (basePermNames.has(name)) continue;
     basePermNames.add(name);
@@ -486,6 +497,9 @@ const appManifestBlock = moduleAppManifest.length > 0
   ? "\n      " + moduleAppManifest.join("\n      ")
   : "";
 
+// FIX: Enable usesCleartextTraffic by default or per config so non-https links are not blocked
+const cleartextTraffic = cfg.cleartextTraffic !== false ? "true" : "false";
+
 const manifest =
 `<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
@@ -501,7 +515,7 @@ ${rootManifestBlock}
       android:label="@string/app_name"
       android:roundIcon="@mipmap/ic_launcher_round"
       android:supportsRtl="true"
-      android:usesCleartextTraffic="false"
+      android:usesCleartextTraffic="${cleartextTraffic}"
       android:hardwareAccelerated="true"
       android:theme="@style/AppTheme">
       ${launcherBlock}
@@ -537,9 +551,9 @@ fs.writeFileSync(path.join(resDir, "values/strings.xml"),
 fs.writeFileSync(path.join(resDir, "values/colors.xml"),
 `<?xml version="1.0" encoding="utf-8"?>
 <resources>
-  <color name="theme_color">${cfg.themeColor}</color>
-  <color name="theme_color_dark">${cfg.themeColor}</color>
-  <color name="ic_launcher_background">${cfg.themeColor}</color>
+  <color name="theme_color">${themeColor}</color>
+  <color name="theme_color_dark">${themeColor}</color>
+  <color name="ic_launcher_background">${themeColor}</color>
 </resources>
 `);
 
@@ -570,25 +584,34 @@ const foregroundSizes = {
 
 let userIconPath = null;
 if (cfg.iconBase64) {
-  const m = cfg.iconBase64.match(/^data:image\/png;base64,(.+)$/);
-  if (m) {
+  // Support png, jpeg, webp or raw base64 string
+  const m = cfg.iconBase64.match(/^data:image\/[a-zA-Z+]+;base64,([\s\S]+)$/) || [null, cfg.iconBase64];
+  if (m && m) {
     userIconPath = path.join(ROOT, ".user-icon.png");
-    fs.writeFileSync(userIconPath, Buffer.from(m[1], "base64"));
-    console.log("User icon saved:", fs.statSync(userIconPath).size, "bytes");
+    try {
+      fs.writeFileSync(userIconPath, Buffer.from(m.replace(/\s/g, ""), "base64"));
+      console.log("User icon saved:", fs.statSync(userIconPath).size, "bytes");
+    } catch (e) {
+      console.warn("Failed to parse iconBase64:", e.message);
+      userIconPath = null;
+    }
   }
 }
 
-let magickOk = false;
-try { execSync("which convert", { stdio: "pipe" }); magickOk = true; } catch { magickOk = false; }
+let magickCmd = null;
+try { execSync("which convert", { stdio: "pipe" }); magickCmd = "convert"; } catch {}
+if (!magickCmd) {
+  try { execSync("which magick", { stdio: "pipe" }); magickCmd = "magick"; } catch {}
+}
 
 // Main ic_launcher.png (all densities)
 for (const [dir, size] of Object.entries(iconSizes)) {
   const dest = path.join(resDir, dir, "ic_launcher.png");
   let done = false;
-  if (userIconPath && magickOk) {
+  if (userIconPath && magickCmd) {
     try {
       execSync(
-        `convert "${userIconPath}" -background none -resize ${size}x${size} ` +
+        `${magickCmd} "${userIconPath}" -background none -resize ${size}x${size} ` +
         `-gravity center -extent ${size}x${size} -strip ` +
         `-define png:color-type=6 -depth 8 PNG32:"${dest}"`,
         { stdio: "pipe" }
@@ -596,7 +619,7 @@ for (const [dir, size] of Object.entries(iconSizes)) {
       done = true;
     } catch (e) { console.warn(`Icon ${dir} failed: ${e.message}`); }
   }
-  if (!done) fs.writeFileSync(dest, generateSolidPng(cfg.themeColor, size));
+  if (!done) fs.writeFileSync(dest, generateSolidPng(themeColor, size));
 }
 
 // Round version (same image)
@@ -610,11 +633,11 @@ for (const [dir] of Object.entries(iconSizes)) {
 for (const [dir, size] of Object.entries(foregroundSizes)) {
   const dest = path.join(resDir, dir, "ic_launcher_foreground.png");
   let done = false;
-  if (userIconPath && magickOk) {
+  if (userIconPath && magickCmd) {
     try {
       const innerSize = Math.round(size * 0.66);
       execSync(
-        `convert -size ${size}x${size} xc:none ` +
+        `${magickCmd} -size ${size}x${size} xc:none ` +
         `\\( "${userIconPath}" -resize ${innerSize}x${innerSize} \\) ` +
         `-gravity center -composite -strip ` +
         `-define png:color-type=6 -depth 8 PNG32:"${dest}"`,
@@ -623,7 +646,7 @@ for (const [dir, size] of Object.entries(foregroundSizes)) {
       done = true;
     } catch (e) { console.warn(`Foreground ${dir} failed: ${e.message}`); }
   }
-  if (!done) fs.writeFileSync(dest, generateSolidPng(cfg.themeColor, size));
+  if (!done) fs.writeFileSync(dest, generateSolidPng(themeColor, size));
 }
 
 // Adaptive icon XML (Android 8+)
@@ -658,7 +681,7 @@ if (!isNativeMode) {
     JSON.stringify({
       appMode: cfg.appMode || "hybrid",
       websiteUrl: cfg.websiteUrl,
-      themeColor: cfg.themeColor,
+      themeColor: themeColor,
       enableJs: cfg.enableJs,
       enableFileUpload: cfg.enableFileUpload,
       enableCamera: cfg.enableCamera,
@@ -675,14 +698,20 @@ if (!isNativeMode) {
 // ═══════════════════════════════════════════════════════════════
 const permsArrayKt = rp.length > 0 ? rp.map(p => `"${p}"`).join(", ") : "";
 const hasOfflineStr = hasOffline ? "true" : "false";
-const appMode = cfg.appMode || "hybrid";
-const appModeStr = JSON.stringify(appMode);
+const appModeStr = JSON.stringify(cfg.appMode || "hybrid");
+
+// Safely escape website URL so quotes, backslashes, or $ won't break Kotlin syntax
+const safeLiveUrl = (cfg.websiteUrl || "https://example.com")
+  .replace(/\\/g, "\\\\")
+  .replace(/"/g, '\\"')
+  .replace(/\$/g, "\\$");
 
 const mainActivity =
 `package ${cfg.packageName}
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
@@ -707,12 +736,17 @@ class MainActivity : AppCompatActivity() {
     private val startupPermissions = arrayOf(${permsArrayKt})
     private val HAS_OFFLINE = ${hasOfflineStr}
     private val APP_MODE = ${appModeStr}
-    private val LIVE_URL = "${cfg.websiteUrl}"
+    private val LIVE_URL = "${safeLiveUrl}"
     private val OFFLINE_URL = "file:///android_asset/index.html"
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Native mode guard: If MainActivity is ever reached in native mode, do not load webview
+        if (APP_MODE == "native") {
+            return
+        }
 
         val config = readConfig()
 
@@ -747,9 +781,18 @@ class MainActivity : AppCompatActivity() {
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                 val url = request?.url?.toString() ?: return false
-                return if (url.startsWith("http") || url.startsWith("file:")) {
-                    view?.loadUrl(url); true
-                } else false
+                // Handle standard HTTP, HTTPS and local asset files inside WebView
+                if (url.startsWith("http://") || url.startsWith("https://") || url.startsWith("file:")) {
+                    return false
+                }
+                // Handle external custom schemes (tel, mailto, whatsapp, sms, upi, intent)
+                return try {
+                    val intent = Intent(Intent.ACTION_VIEW, request.url)
+                    view?.context?.startActivity(intent)
+                    true
+                } catch (e: Exception) {
+                    true
+                }
             }
         }
 
@@ -794,7 +837,7 @@ class MainActivity : AppCompatActivity() {
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (webView.canGoBack()) webView.goBack() else finish()
+                if (::webView.isInitialized && webView.canGoBack()) webView.goBack() else finish()
             }
         })
 
@@ -821,6 +864,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun loadBestUrl() {
         val url: String? = when (APP_MODE) {
+            "native" -> null
             "offline" -> if (HAS_OFFLINE) OFFLINE_URL else null
             "online" -> LIVE_URL
             else -> {
@@ -830,8 +874,11 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        if (url != null) webView.loadUrl(url)
-        else webView.loadDataWithBaseURL(null, noInternetHtml(), "text/html", "UTF-8", null)
+        if (url != null) {
+            webView.loadUrl(url)
+        } else if (APP_MODE != "native") {
+            webView.loadDataWithBaseURL(null, noInternetHtml(), "text/html", "UTF-8", null)
+        }
     }
 
     private fun noInternetHtml(): String {
@@ -885,14 +932,14 @@ class MainActivity : AppCompatActivity() {
             val text = assets.open("config.json").bufferedReader().use { it.readText() }
             JSONObject(text)
         } catch (e: Exception) {
-            JSONObject().put("websiteUrl", "https://example.com")
+            JSONObject().put("websiteUrl", LIVE_URL)
         }
     }
 }
 `;
 
 if (skipDefaultMainActivity) {
-  console.log("⚑ Skipping default MainActivity.kt");
+  console.log("⚑ Skipping default WebView MainActivity.kt (Native mode or Custom module provided)");
 } else {
   fs.writeFileSync(path.join(javaDir, "MainActivity.kt"), mainActivity);
   console.log("✓ Wrote default WebView MainActivity.kt");
@@ -904,16 +951,23 @@ console.log("✅ Android project generated at", ROOT);
 // HELPERS
 // ═══════════════════════════════════════════════════════════════
 function escapeXml(s) {
-  return String(s).replace(/[<>&'"]/g, (c) => ({
-    "<": "&lt;", ">": "&gt;", "&": "&amp;", "'": "&apos;", '"': "&quot;"
-  }[c]));
+  if (!s) return "";
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "\\'")
+    .replace(/@/g, "\\@")
+    .replace(/\?/g, "\\?");
 }
 
 function generateSolidPng(hex, size = 192) {
   const { deflateSync } = require("zlib");
-  const r = parseInt(hex.slice(1, 3), 16) || 0x1f;
-  const g = parseInt(hex.slice(3, 5), 16) || 0x6f;
-  const b = parseInt(hex.slice(5, 7), 16) || 0xeb;
+  const safeHex = (hex && String(hex).startsWith("#")) ? hex : (hex ? `#${hex}` : "#1f6feb");
+  const r = parseInt(safeHex.slice(1, 3), 16) || 0x1f;
+  const g = parseInt(safeHex.slice(3, 5), 16) || 0x6f;
+  const b = parseInt(safeHex.slice(5, 7), 16) || 0xeb;
 
   const width = size, height = size;
   const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
