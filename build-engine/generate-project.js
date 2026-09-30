@@ -2,7 +2,7 @@
 /**
  * Generates a complete Android project from config.json.
  *
- * Reads module-flags.json (written by install-custom-modules.js scan) and:
+ * Readsd module-flags.json (written by install-custom-modules.js scan) and:
  *   - Merges module deps into app/build.gradle
  *   - Merges module manifest fragments into AndroidManifest.xml
  *   - Skips default MainActivity if native mode or a custom module overrides it
@@ -1011,3 +1011,4 @@ function generateSolidPng(hex, size = 192) {
     return ~c;
   }
 }
+
