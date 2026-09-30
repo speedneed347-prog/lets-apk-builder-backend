@@ -1,0 +1,12 @@
+const assert = require('assert');
+const crypto = require('crypto');
+const { verifyHmac, isFreshTimestamp } = require('./helpers');
+const secret = 's'.repeat(64);
+const payload = Buffer.from(JSON.stringify({ buildId: 'b1', eventId: 'e1' }));
+const sig = 'sha256=' + crypto.createHmac('sha256', secret).update(payload).digest('hex');
+assert.equal(verifyHmac(secret, payload, sig), true);
+assert.equal(verifyHmac('wrong', payload, sig), false);
+assert.equal(verifyHmac('', payload, sig), false);
+assert.equal(isFreshTimestamp(new Date().toISOString()), true);
+assert.equal(isFreshTimestamp(new Date(Date.now() - 10 * 60 * 1000).toISOString()), false);
+console.log('helper security tests: OK');
