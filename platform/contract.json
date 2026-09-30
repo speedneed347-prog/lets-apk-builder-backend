@@ -1,0 +1,9 @@
+{
+  "contractVersion": 1,
+  "apiVersion": 1,
+  "name": "Let-S APK Builder",
+  "supportedAppTypes": ["webview", "file-share"],
+  "supportedAppModes": ["offline", "online", "hybrid", "native"],
+  "supportedBuildFormats": ["apk", "aab"],
+  "buildStates": ["queued", "building", "signing", "uploading", "completed", "failed"]
+}
