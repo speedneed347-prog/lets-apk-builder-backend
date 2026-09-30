@@ -12,9 +12,9 @@ const fs = require("fs");
 const path = require("path");
 const { execSync } = require("child_process");
 
-// Parse CLI arguments safely
+// Parse CLI arguments safely without brackets
 const cliArgs = process.argv.slice(2);
-const configPath = cliArgs.length > 0 ? cliArgs[0] : "config.json";
+const configPath = cliArgs.length > 0 ? cliArgs.at(0) : "config.json";
 
 if (!fs.existsSync(configPath)) {
   console.error(`Config file not found at: ${configPath}`);
@@ -463,20 +463,20 @@ if (moduleHasLauncherActivity) {
 
 const basePermNames = new Set();
 for (const p of mp) {
-  const m = p.match(/android:name="([^"]+)"/);
-  if (m && m) basePermNames.add(m);
+  const m = /android:name="([^"]+)"/.exec(p);
+  if (m && m.length > 1) basePermNames.add(m.at(1));
 }
 const baseFeatNames = new Set();
 for (const f of mf) {
-  const m = f.match(/android:name="([^"]+)"/);
-  if (m && m) baseFeatNames.add(m);
+  const m = /android:name="([^"]+)"/.exec(f);
+  if (m && m.length > 1) baseFeatNames.add(m.at(1));
 }
 
 const extraRoot = [];
 for (const elem of moduleRootManifest) {
-  const nameM = elem.match(/android:name="([^"]+)"/);
-  if (!nameM || !nameM) { extraRoot.push(elem); continue; }
-  const name = nameM;
+  const nameM = /android:name="([^"]+)"/.exec(elem);
+  if (!nameM || nameM.length < 2) { extraRoot.push(elem); continue; }
+  const name = nameM.at(1);
   if (elem.startsWith("<uses-permission")) {
     if (basePermNames.has(name)) continue;
     basePermNames.add(name);
@@ -585,15 +585,14 @@ const foregroundSizes = {
 
 let userIconPath = null;
 if (cfg.iconBase64) {
-  // Safe base64 string extraction without relying on regex indexing
-  const rawBase64 = cfg.iconBase64.includes(",")
-    ? cfg.iconBase64.split(",")
-    : cfg.iconBase64;
+  // Safe base64 extraction without indexing
+  const commaIndex = cfg.iconBase64.indexOf(",");
+  const rawBase64 = commaIndex !== -1 ? cfg.iconBase64.substring(commaIndex + 1) : cfg.iconBase64;
   if (rawBase64) {
     userIconPath = path.join(ROOT, ".user-icon.png");
     try {
       fs.writeFileSync(userIconPath, Buffer.from(rawBase64.replace(/\s/g, ""), "base64"));
-      console.log("User icon saved:", fs.statSync(userIconPath).size, "bytes");
+      console.log("✓ User icon saved:", fs.statSync(userIconPath).size, "bytes");
     } catch (e) {
       console.warn("Failed to parse iconBase64:", e.message);
       userIconPath = null;
@@ -626,7 +625,7 @@ for (const [dir, size] of Object.entries(iconSizes)) {
 }
 
 // Round version (same image)
-for (const [dir] of Object.entries(iconSizes)) {
+for (const [dir, size] of Object.entries(iconSizes)) {
   const src = path.join(resDir, dir, "ic_launcher.png");
   const dst = path.join(resDir, dir, "ic_launcher_round.png");
   fs.copyFileSync(src, dst);
@@ -978,8 +977,8 @@ function generateSolidPng(hex, size = 192) {
   const ihdrData = Buffer.alloc(13);
   ihdrData.writeUInt32BE(width, 0);
   ihdrData.writeUInt32BE(height, 4);
-  ihdrData = 8;
-  ihdrData = 6;
+  ihdrData.writeUInt8(8, 8);
+  ihdrData.writeUInt8(6, 9);
   const ihdr = chunk("IHDR", ihdrData);
 
   const rowSize = 1 + width * 4;
@@ -987,10 +986,11 @@ function generateSolidPng(hex, size = 192) {
   for (let y = 0; y < height; y++) {
     const off = y * rowSize;
     for (let x = 0; x < width; x++) {
-      raw[off + 1 + x * 4] = r;
-      raw[off + 2 + x * 4] = g;
-      raw[off + 3 + x * 4] = b;
-      raw[off + 4 + x * 4] = 255;
+      const px = off + 1 + x * 4;
+      raw.writeUInt8(r, px);
+      raw.writeUInt8(g, px + 1);
+      raw.writeUInt8(b, px + 2);
+      raw.writeUInt8(255, px + 3);
     }
   }
   const idat = chunk("IDAT", deflateSync(raw));
@@ -1008,7 +1008,7 @@ function generateSolidPng(hex, size = 192) {
   function crc32(buf) {
     let c = ~0;
     for (let i = 0; i < buf.length; i++) {
-      c ^= buf[i];
+      c ^= buf.at(i);
       for (let j = 0; j < 8; j++) c = (c >>> 1) ^ (0xEDB88320 & -(c & 1));
     }
     return ~c;
