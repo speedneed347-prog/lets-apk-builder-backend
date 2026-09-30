@@ -1,0 +1,263 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      buildId:
+        required: true
+      webhookUrl:
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: lets-apk-builder-${{ github.event.inputs.buildId }}
+      cancel-in-progress: false
+    timeout-minutes: 25
+
+    steps:
+      # ═══════════════════════════════════════════════════════════════
+      # 1. Checkout
+      # ═══════════════════════════════════════════════════════════════
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Notify Received
+        env:
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          BUILD_ID: ${{ github.event.inputs.buildId }}
+          WEBHOOK_URL: ${{ github.event.inputs.webhookUrl }}
+          STEP_NAME: "Received job"
+          STEP_INDEX: "1"
+        run: node scripts/notify-step.js
+
+      # ═══════════════════════════════════════════════════════════════
+      # 2. Environment setup
+      # ═══════════════════════════════════════════════════════════════
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools" >> $GITHUB_ENV
+          sdkmanager --version || true
+
+      # ⭐ ImageMagick for icon conversion
+      - name: Install ImageMagick
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y imagemagick
+          convert --version
+          echo "✓ ImageMagick installed"
+
+      - name: Install Android build tools
+        run: |
+          yes | sdkmanager "platforms;android-34" "build-tools;34.0.0" >/dev/null 2>&1 || true
+
+      - name: Notify SDK ready
+        env:
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          BUILD_ID: ${{ github.event.inputs.buildId }}
+          WEBHOOK_URL: ${{ github.event.inputs.webhookUrl }}
+          STEP_NAME: "Android SDK ready"
+          STEP_INDEX: "2"
+        run: node scripts/notify-step.js
+
+      # ═══════════════════════════════════════════════════════════════
+      # 3. Fetch config + ZIP
+      # ═══════════════════════════════════════════════════════════════
+      - name: Fetch full config from backend
+        env:
+          BUILD_ID: ${{ github.event.inputs.buildId }}
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          INTERNAL_API_SECRET: ${{ secrets.INTERNAL_API_SECRET || secrets.WEBHOOK_SECRET }}
+        run: |
+          curl -sS -f \
+            -H "X-Internal-Secret: $INTERNAL_API_SECRET" \
+            "$BACKEND_URL/api/internal/config/$BUILD_ID" \
+            -o config-response.json
+          node -e "const fs=require('fs');const d=JSON.parse(fs.readFileSync('config-response.json','utf8'));if(!d.config)throw new Error('No config');fs.writeFileSync('config.json',JSON.stringify(d.config,null,2));console.log('config.json written');"
+
+      - name: Fetch offline ZIP (if any)
+        env:
+          BUILD_ID: ${{ github.event.inputs.buildId }}
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          INTERNAL_API_SECRET: ${{ secrets.INTERNAL_API_SECRET || secrets.WEBHOOK_SECRET }}
+        run: |
+          if curl -sS -f \
+               -H "X-Internal-Secret: $INTERNAL_API_SECRET" \
+               "$BACKEND_URL/api/internal/zip/$BUILD_ID" \
+               -o zip-response.json; then
+            node -e "const fs=require('fs');const d=JSON.parse(fs.readFileSync('zip-response.json','utf8'));fs.writeFileSync('offline.zip.b64', d.base64 || '');console.log('Offline ZIP:', Math.round((d.size||0)/1024), 'KB');"
+          else
+            echo "No offline ZIP for this build"
+            : > offline.zip.b64
+          fi
+
+      - name: Notify config fetched
+        env:
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          BUILD_ID: ${{ github.event.inputs.buildId }}
+          WEBHOOK_URL: ${{ github.event.inputs.webhookUrl }}
+          STEP_NAME: "Configuration loaded"
+          STEP_INDEX: "3"
+        run: node scripts/notify-step.js
+
+      # ═══════════════════════════════════════════════════════════════
+      # 4. Scan modules
+      # ═══════════════════════════════════════════════════════════════
+      - name: Reset module flags
+        run: rm -f module-flags.json || true
+
+      - name: Scan custom modules
+        env:
+          BUILD_ID: ${{ github.event.inputs.buildId }}
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+        run: |
+          npm install --no-save node-fetch@2
+          node scripts/install-custom-modules.js "$BUILD_ID" scan
+
+      # ═══════════════════════════════════════════════════════════════
+      # 5. Generate Android project
+      # ═══════════════════════════════════════════════════════════════
+      - name: Generate Android project
+        run: node build-engine/generate-project.js config.json
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Notify project generated
+        env:
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          BUILD_ID: ${{ github.event.inputs.buildId }}
+          WEBHOOK_URL: ${{ github.event.inputs.webhookUrl }}
+          STEP_NAME: "Android project generated"
+          STEP_INDEX: "4"
+        run: node scripts/notify-step.js
+
+      # ═══════════════════════════════════════════════════════════════
+      # 6. Install modules
+      # ═══════════════════════════════════════════════════════════════
+      - name: Install custom modules
+        env:
+          BUILD_ID: ${{ github.event.inputs.buildId }}
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+        run: node scripts/install-custom-modules.js "$BUILD_ID"
+
+      # ═══════════════════════════════════════════════════════════════
+      # 7. Unified APK / AAB build pipeline
+      # ═══════════════════════════════════════════════════════════════
+      - name: Resolve build format
+        run: |
+          BUILD_FORMAT=$(node -e "const c=require('./config.json');const f=String(c.buildFormat||c.outputFormat||'apk').toLowerCase();if(!['apk','aab'].includes(f))throw new Error('Invalid buildFormat: '+f);console.log(f)")
+          echo "BUILD_FORMAT=$BUILD_FORMAT" >> "$GITHUB_ENV"
+          echo "✓ Build format: $BUILD_FORMAT"
+
+      - name: Build and sign artifact
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          ANDROID_BUILD_TOOLS_VERSION: "34.0.0"
+          BUILD_RESULT_FILE: build-result.json
+        run: node build-engine/build-pipeline.js config.json android-project . build-result.json
+
+      - name: Export artifact metadata
+        run: |
+          node -e "const fs=require('fs');const r=JSON.parse(fs.readFileSync('build-result.json','utf8'));fs.appendFileSync(process.env.GITHUB_ENV,'ARTIFACT_TYPE='+r.artifactType+'\nARTIFACT_FILENAME='+r.fileName+'\nARTIFACT_PATH='+r.path+'\nARTIFACT_SHA256='+r.sha256+'\nARTIFACT_SIZE_BYTES='+r.sizeBytes+'\n');console.log('✓ '+r.artifactType.toUpperCase()+': '+r.fileName+' ('+r.sha256+')')"
+
+      - name: Notify artifact signed
+        env:
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          BUILD_ID: ${{ github.event.inputs.buildId }}
+          WEBHOOK_URL: ${{ github.event.inputs.webhookUrl }}
+          STEP_NAME: "Artifact signed"
+          STEP_INDEX: "5"
+          STATUS: "signing"
+          ARTIFACT_FILENAME: ${{ env.ARTIFACT_FILENAME }}
+          ARTIFACT_SHA256: ${{ env.ARTIFACT_SHA256 }}
+          ARTIFACT_SIZE_BYTES: ${{ env.ARTIFACT_SIZE_BYTES }}
+          EVENT_ID: "${{ github.run_id }}-signing"
+        run: node scripts/notify-step.js
+
+      - name: Collect artifact metadata
+        run: |
+          rm -rf artifacts
+          node build-engine/artifacts/artifact-manager.js android-project config.json "$ARTIFACT_TYPE" artifacts "$ARTIFACT_PATH"
+          cat artifacts/artifact-manifest.json
+
+      # ═══════════════════════════════════════════════════════════════
+      # 8. Upload APK / AAB to GitHub Releases
+      # ═══════════════════════════════════════════════════════════════
+      - name: Upload artifact to GitHub Releases
+        id: upload
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          ARTIFACT_URL=$(node scripts/upload-to-github-release.js "$ARTIFACT_PATH" "${{ github.event.inputs.buildId }}" "$ARTIFACT_TYPE" | tail -n1)
+          echo "artifact_url=$ARTIFACT_URL" >> "$GITHUB_OUTPUT"
+          echo "✓ Uploaded: $ARTIFACT_URL"
+
+      - name: Notify uploaded
+        env:
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          BUILD_ID: ${{ github.event.inputs.buildId }}
+          WEBHOOK_URL: ${{ github.event.inputs.webhookUrl }}
+          STEP_NAME: "Uploaded artifact to GitHub Releases"
+          STEP_INDEX: "6"
+          STATUS: "uploading"
+          LOG_LINE: "${ARTIFACT_FILENAME} → ${{ steps.upload.outputs.artifact_url }}"
+          ARTIFACT_FILENAME: ${{ env.ARTIFACT_FILENAME }}
+          ARTIFACT_SHA256: ${{ env.ARTIFACT_SHA256 }}
+          ARTIFACT_SIZE_BYTES: ${{ env.ARTIFACT_SIZE_BYTES }}
+          EVENT_ID: "${{ github.run_id }}-uploading"
+        run: node scripts/notify-step.js
+
+      # ═══════════════════════════════════════════════════════════════
+      # 10. Notify completed / failed
+      # ═══════════════════════════════════════════════════════════════
+      - name: Notify completed
+        if: success()
+        env:
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          BUILD_ID: ${{ github.event.inputs.buildId }}
+          WEBHOOK_URL: ${{ github.event.inputs.webhookUrl }}
+          APK_URL: ${{ steps.upload.outputs.artifact_url }}
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact_url }}
+          ARTIFACT_TYPE: ${{ env.ARTIFACT_TYPE }}
+          ARTIFACT_FILENAME: ${{ env.ARTIFACT_FILENAME }}
+          ARTIFACT_SHA256: ${{ env.ARTIFACT_SHA256 }}
+          ARTIFACT_SIZE_BYTES: ${{ env.ARTIFACT_SIZE_BYTES }}
+          EVENT_ID: "${{ github.run_id }}-completed"
+        run: node scripts/notify-webhook.js completed
+
+      - name: Notify failed
+        if: failure()
+        env:
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          BUILD_ID: ${{ github.event.inputs.buildId }}
+          WEBHOOK_URL: ${{ github.event.inputs.webhookUrl }}
+          EVENT_ID: "${{ github.run_id }}-failed"
+        run: node scripts/notify-webhook.js failed "Build failed. Check GitHub Actions logs."
