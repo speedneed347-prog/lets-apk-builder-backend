@@ -1,0 +1,19 @@
+{
+  "appType": "webview",
+  "appMode": "online",
+  "buildFormat": "apk",
+  "appName": "My Web App",
+  "websiteUrl": "https://example.com",
+  "packageName": "com.example.mywebapp",
+  "versionName": "1.0.0",
+  "versionCode": 1,
+  "themeColor": "#1f6feb",
+  "orientation": "portrait",
+  "enableJs": true,
+  "enableNetworkState": true,
+  "enableFileUpload": true,
+  "enableCamera": false,
+  "enableMicrophone": false,
+  "enableGeolocation": false,
+  "commonModules": []
+}
