@@ -2,7 +2,7 @@
 /**
  * Generates a complete Android project from config.json.
  *
- * Readsd module-flags.json (written by install-custom-modules.js scan) and:
+ * Reads module-flags.json (written by install-custom-modules.js scan) and:
  *   - Merges module deps into app/build.gradle
  *   - Merges module manifest fragments into AndroidManifest.xml
  *   - Skips default MainActivity if native mode or a custom module overrides it
@@ -12,7 +12,10 @@ const fs = require("fs");
 const path = require("path");
 const { execSync } = require("child_process");
 
-const configPath = process.argv || "config.json";
+// Parse CLI arguments safely
+const cliArgs = process.argv.slice(2);
+const configPath = cliArgs.length > 0 ? cliArgs[0] : "config.json";
+
 if (!fs.existsSync(configPath)) {
   console.error(`Config file not found at: ${configPath}`);
   process.exit(1);
@@ -28,10 +31,9 @@ cfg.versionName = cfg.versionName || "1.0.0";
 cfg.appMode = cfg.appMode || "hybrid";
 cfg.websiteUrl = cfg.websiteUrl || "https://example.com";
 
-// Safe Theme Color (Ensures leading '#' exists and prevents crashes)
-const themeColor = (cfg.themeColor && String(cfg.themeColor).trim().startsWith("#"))
-  ? String(cfg.themeColor).trim()
-  : (cfg.themeColor ? `#${String(cfg.themeColor).trim()}` : "#1f6feb");
+// Safe Theme Color (Ensures leading '#' exists and prevents hex slice crashes)
+const rawTheme = (cfg.themeColor ? String(cfg.themeColor).trim() : "");
+const themeColor = rawTheme.startsWith("#") ? rawTheme : (rawTheme ? `#${rawTheme}` : "#1f6feb");
 
 const ROOT = path.resolve("android-project");
 const pkgPath = cfg.packageName.split(".").join("/");
@@ -72,14 +74,14 @@ const moduleAppManifest = moduleFlags.appManifest || [];
 const moduleOverridesMainActivity = moduleFlags.overrideMainActivity === true;
 const isNativeMode = cfg.appMode === "native";
 
-// Check if a custom module provides its own MAIN/LAUNCHER intent filter
+// Check if any custom module provides its own MAIN/LAUNCHER intent filter
 const moduleHasLauncherActivity = (moduleAppManifest || []).some((entry) =>
   /android\:name\s*=/.test(entry) &&
   /android\.intent\.action\.MAIN/.test(entry) &&
   /android\.intent\.category\.LAUNCHER/.test(entry)
 );
 
-// FIX: Native mode-এ অথবা Custom module থাকলে ডিফল্ট WebView MainActivity বাদ দেওয়া হবে
+// In Native mode OR when a custom module overrides MainActivity, skip the default WebView MainActivity
 const skipDefaultMainActivity = isNativeMode || (moduleOverridesMainActivity && moduleHasLauncherActivity);
 
 console.log("appMode:", cfg.appMode);
@@ -338,7 +340,6 @@ if (cfg.enableReadMediaAudio) {
 if (cfg.enableStorage || cfg.enableFileUpload) {
   mp.push(`<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />`);
   mp.push(`<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />`);
-  // Android 13+ storage support
   mp.push(`<uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />`);
   rp.push("android.permission.READ_EXTERNAL_STORAGE");
 }
@@ -463,18 +464,18 @@ if (moduleHasLauncherActivity) {
 const basePermNames = new Set();
 for (const p of mp) {
   const m = p.match(/android:name="([^"]+)"/);
-  if (m) basePermNames.add(m);
+  if (m && m) basePermNames.add(m);
 }
 const baseFeatNames = new Set();
 for (const f of mf) {
   const m = f.match(/android:name="([^"]+)"/);
-  if (m) baseFeatNames.add(m);
+  if (m && m) baseFeatNames.add(m);
 }
 
 const extraRoot = [];
 for (const elem of moduleRootManifest) {
   const nameM = elem.match(/android:name="([^"]+)"/);
-  if (!nameM) { extraRoot.push(elem); continue; }
+  if (!nameM || !nameM) { extraRoot.push(elem); continue; }
   const name = nameM;
   if (elem.startsWith("<uses-permission")) {
     if (basePermNames.has(name)) continue;
@@ -497,7 +498,7 @@ const appManifestBlock = moduleAppManifest.length > 0
   ? "\n      " + moduleAppManifest.join("\n      ")
   : "";
 
-// FIX: Enable usesCleartextTraffic by default or per config so non-https links are not blocked
+// Allow normal HTTP as well as HTTPS
 const cleartextTraffic = cfg.cleartextTraffic !== false ? "true" : "false";
 
 const manifest =
@@ -584,7 +585,7 @@ const foregroundSizes = {
 
 let userIconPath = null;
 if (cfg.iconBase64) {
-  // Support png, jpeg, webp or raw base64 string
+  // Support png, jpeg, webp or raw base64 data
   const m = cfg.iconBase64.match(/^data:image\/[a-zA-Z+]+;base64,([\s\S]+)$/) || [null, cfg.iconBase64];
   if (m && m) {
     userIconPath = path.join(ROOT, ".user-icon.png");
@@ -975,7 +976,7 @@ function generateSolidPng(hex, size = 192) {
   const ihdrData = Buffer.alloc(13);
   ihdrData.writeUInt32BE(width, 0);
   ihdrData.writeUInt32BE(height, 4);
-  ihdrData[8] = 8;
+  ihdrData = 8;
   ihdrData[9] = 6;
   const ihdr = chunk("IHDR", ihdrData);
 
@@ -1011,4 +1012,3 @@ function generateSolidPng(hex, size = 192) {
     return ~c;
   }
 }
-
