@@ -585,12 +585,14 @@ const foregroundSizes = {
 
 let userIconPath = null;
 if (cfg.iconBase64) {
-  // Support png, jpeg, webp or raw base64 data
-  const m = cfg.iconBase64.match(/^data:image\/[a-zA-Z+]+;base64,([\s\S]+)$/) || [null, cfg.iconBase64];
-  if (m && m) {
+  // Safe base64 string extraction without relying on regex indexing
+  const rawBase64 = cfg.iconBase64.includes(",")
+    ? cfg.iconBase64.split(",")
+    : cfg.iconBase64;
+  if (rawBase64) {
     userIconPath = path.join(ROOT, ".user-icon.png");
     try {
-      fs.writeFileSync(userIconPath, Buffer.from(m.replace(/\s/g, ""), "base64"));
+      fs.writeFileSync(userIconPath, Buffer.from(rawBase64.replace(/\s/g, ""), "base64"));
       console.log("User icon saved:", fs.statSync(userIconPath).size, "bytes");
     } catch (e) {
       console.warn("Failed to parse iconBase64:", e.message);
@@ -977,7 +979,7 @@ function generateSolidPng(hex, size = 192) {
   ihdrData.writeUInt32BE(width, 0);
   ihdrData.writeUInt32BE(height, 4);
   ihdrData = 8;
-  ihdrData[9] = 6;
+  ihdrData = 6;
   const ihdr = chunk("IHDR", ihdrData);
 
   const rowSize = 1 + width * 4;
