@@ -18,7 +18,7 @@ router.get("/build/:id/history", apiLimiter, optionalAuth, ctrl.getBuildHistory)
 router.get("/build/:id/artifacts", apiLimiter, optionalAuth, ctrl.getBuildArtifacts);
 router.get("/build/:id/stream", apiLimiter, optionalAuth, ctrl.streamBuildById);
 router.get("/build/:id", apiLimiter, optionalAuth, ctrl.getBuildById);
-router.get("/download/:id", apiLimiter, ctrl.downloadBuild);
+router.get("/download/:id", apiLimiter, optionalAuth, ctrl.downloadBuild);
 router.get("/builds", apiLimiter, optionalAuth, ctrl.listBuildsHandler);
 
 // ═══════════════════════════════════════════════════════════════

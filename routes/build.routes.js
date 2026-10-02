@@ -7,7 +7,7 @@ const { optionalAdmin } = require("../middleware/adminMiddleware");
 const ctrl = require("../controllers/build.controller");
 
 // ⭐ optionalAdmin added — sets req.admin if valid JWT present
-router.post("/", buildLimiter, optionalAdmin, validateBuildBody, ctrl.createBuild);
+router.post("/", buildLimiter, optionalAuth, optionalAdmin, validateBuildBody, ctrl.createBuild);
 router.get("/", apiLimiter, optionalAuth, ctrl.listBuildsHandler);
 
 module.exports = router;
