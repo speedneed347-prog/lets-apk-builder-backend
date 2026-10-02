@@ -2,6 +2,16 @@ const PACKAGE_RE = /^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/;
 const SEMVER_RE = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
 const HEX_COLOR_RE = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
 
+// Java/Kotlin reserved words — a package segment like "com.example.in" breaks compilation.
+const RESERVED_WORDS = new Set([
+  "abstract","assert","boolean","break","byte","case","catch","char","class","const","continue",
+  "default","do","double","else","enum","extends","final","finally","float","for","goto","if",
+  "implements","import","instanceof","int","interface","long","native","new","package","private",
+  "protected","public","return","short","static","strictfp","super","switch","synchronized","this",
+  "throw","throws","transient","try","void","volatile","while","true","false","null",
+  "fun","val","var","when","object","is","in","as","typealias","typeof",
+]);
+
 class ValidationError extends Error {
   constructor(message, field) {
     super(message);
@@ -142,6 +152,8 @@ function validateConfig(body) {
   const packageName = String(body.packageName || "").trim();
   assert(PACKAGE_RE.test(packageName), "packageName must match com.example.app", "packageName");
   assert(packageName.length <= 100, "packageName too long", "packageName");
+  const badSegment = packageName.split(".").find((seg) => RESERVED_WORDS.has(seg));
+  assert(!badSegment, `packageName segment "${badSegment}" is a reserved Java/Kotlin word`, "packageName");
 
   const versionName = String(body.versionName || "1.0.0").trim();
   assert(SEMVER_RE.test(versionName), "versionName must be semver (e.g. 1.0.0)", "versionName");
@@ -153,8 +165,13 @@ function validateConfig(body) {
     "versionCode"
   );
 
-  const themeColor = String(body.themeColor || "#1f6feb").trim();
+  let themeColor = String(body.themeColor || "#1f6feb").trim();
   assert(HEX_COLOR_RE.test(themeColor), "themeColor must be a hex color", "themeColor");
+  // Expand #abc -> #aabbcc (icon generator only understands 6-digit hex)
+  if (themeColor.length === 4) {
+    themeColor = "#" + themeColor.slice(1).split("").map((c) => c + c).join("");
+  }
+  themeColor = themeColor.toLowerCase();
 
   let iconBase64 = body.iconBase64 ? String(body.iconBase64) : null;
   if (iconBase64) {

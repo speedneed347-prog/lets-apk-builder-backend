@@ -36,6 +36,7 @@ async function claimNextBuild() {
     const q = qSnap.exists ? qSnap.data() : {};
 
     let activeNeedsRelease = false;
+    let activeToFail = null; // only non-terminal builds may be force-failed
     if (q.activeBuildId) {
       const activeRef = db.collection("builds").doc(q.activeBuildId);
       const activeSnap = await tx.get(activeRef);
@@ -45,11 +46,17 @@ async function claimNextBuild() {
         return null;
       }
       activeNeedsRelease = true;
+      if (active && !["completed", "failed"].includes(active.status)) {
+        activeToFail = q.activeBuildId;
+      }
     }
 
     // IMPORTANT: every Firestore read happens before any transaction write.
+    // Only scan builds that are actually waiting. Scanning ALL builds (oldest first)
+    // would starve new jobs once the oldest SCAN_LIMIT builds are finished.
+    // Requires composite index: builds(status ASC, createdAt ASC) — see firestore.indexes.json
     const snap = await tx.get(
-      db.collection("builds").orderBy("createdAt", "asc").limit(SCAN_LIMIT)
+      db.collection("builds").where("status", "==", "queued").orderBy("createdAt", "asc").limit(SCAN_LIMIT)
     );
 
     let candidate = null;
@@ -62,8 +69,8 @@ async function claimNextBuild() {
     }
 
     if (activeNeedsRelease) {
-      if (q.activeBuildId) {
-        tx.set(db.collection("builds").doc(q.activeBuildId), {
+      if (activeToFail) {
+        tx.set(db.collection("builds").doc(activeToFail), {
           status: "failed",
           dispatchStatus: "lease-expired",
           error: "Build queue lease expired before the worker reported completion.",
