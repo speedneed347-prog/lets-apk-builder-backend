@@ -1,7 +1,7 @@
 const { v4: uuidv4 } = require("uuid");
 const {
   newBuildRecord, saveBuild, getBuild, listBuilds,
-  saveZipChunks, getZipChunks,
+  saveZipChunks, getZipChunks, cleanupBuildInputs,
 } = require("../services/buildService");
 const {
   saveModuleChunks, getModuleChunks, listBuildModules,
@@ -9,8 +9,17 @@ const {
 const { enqueueBuild } = require("../services/buildQueueService");
 const { streamBuild } = require("../services/buildStreamService");
 const { record } = require("../services/auditService");
-const { listBuildHistory, listArtifactRecords } = require("../services/buildHistoryService");
+const { listBuildHistory, listArtifactRecords, appendBuildHistory } = require("../services/buildHistoryService");
 const logger = require("../utils/logger");
+
+// Single ownership rule used by every endpoint.
+// JWT off, or build has no owner  -> public.
+// Otherwise the caller must be the owner.
+function canAccessBuild(build, req) {
+  if (process.env.JWT_ENABLED !== "true") return true;
+  if (!build.userId) return true;
+  return !!req.user?.uid && build.userId === req.user.uid;
+}
 
 // ═══════════════════════════════════════════════════════════════
 // CREATE BUILD
@@ -43,35 +52,29 @@ async function createBuild(req, res, next) {
       });
     }
 
-    // ─── Save build record ───
-    const record_ = newBuildRecord({ id: buildId, config, userId: req.user?.uid });
-    await saveBuild(record_);
-    const { appendBuildHistory } = require("../services/buildHistoryService");
-    await appendBuildHistory(buildId, { type: "build.created", status: "queued", message: "Build queued", source: "backend" });
-
-    // ─── Save offline ZIP (chunked) ───
-    if (offlineZipBase64) {
-      try {
+    // ─── Save inputs FIRST ───
+    // The queue pump polls every few seconds and claims any "queued" build.
+    // If the build record were written first, a worker could start before the
+    // ZIP/modules exist and silently produce an app without them.
+    try {
+      if (offlineZipBase64) {
         await saveZipChunks(buildId, offlineZipBase64, offlineZipName, offlineZipSize);
         logger.info("offline ZIP saved", buildId, `${Math.round(offlineZipSize / 1024)} KB`);
-      } catch (zipErr) {
-        logger.error("offline ZIP chunk save failed", buildId, zipErr.message);
-        // Non-fatal — build can still work without offline
       }
+      for (const mod of modules) {
+        await saveModuleChunks(buildId, mod.id, mod.base64, mod.name, mod.size);
+        logger.info("module saved", buildId, mod.id, `${Math.round(mod.size / 1024)} KB`);
+      }
+    } catch (inputErr) {
+      logger.error("build input save failed", buildId, inputErr.message);
+      try { await cleanupBuildInputs(buildId); } catch (_) { /* best effort */ }
+      return res.status(500).json({ error: "Failed to store build files. Please try again." });
     }
 
-    // ─── Save each custom module (chunked) ───
-    if (modules.length > 0) {
-      for (const mod of modules) {
-        try {
-          await saveModuleChunks(buildId, mod.id, mod.base64, mod.name, mod.size);
-          logger.info("module saved", buildId, mod.id, `${Math.round(mod.size / 1024)} KB`);
-        } catch (modErr) {
-          logger.error("module chunk save failed", buildId, mod.id, modErr.message);
-          // Non-fatal — skip this module, build continues
-        }
-      }
-    }
+    // ─── Save build record (now safe for the queue to pick up) ───
+    const record_ = newBuildRecord({ id: buildId, config, userId: req.user?.uid });
+    await saveBuild(record_);
+    await appendBuildHistory(buildId, { type: "build.created", status: "queued", message: "Build queued", source: "backend" });
 
     // ─── Enqueue build; the queue owns GitHub Actions dispatch ───
     await enqueueBuild(buildId);
@@ -104,12 +107,7 @@ async function getBuildById(req, res, next) {
     const build = await getBuild(req.params.id);
     if (!build) return res.status(404).json({ error: "Build not found" });
 
-    if (
-      process.env.JWT_ENABLED === "true" &&
-      build.userId &&
-      req.user?.uid &&
-      build.userId !== req.user.uid
-    ) {
+    if (!canAccessBuild(build, req)) {
       return res.status(403).json({ error: "Forbidden" });
     }
 
@@ -131,7 +129,7 @@ async function getBuildHistory(req, res, next) {
   try {
     const build = await getBuild(req.params.id);
     if (!build) return res.status(404).json({ error: "Build not found" });
-    if (process.env.JWT_ENABLED === "true" && build.userId && build.userId !== req.user?.uid) {
+    if (!canAccessBuild(build, req)) {
       return res.status(403).json({ error: "Forbidden" });
     }
     const history = await listBuildHistory(req.params.id, req.query.limit);
@@ -146,7 +144,7 @@ async function getBuildArtifacts(req, res, next) {
   try {
     const build = await getBuild(req.params.id);
     if (!build) return res.status(404).json({ error: "Build not found" });
-    if (process.env.JWT_ENABLED === "true" && build.userId && build.userId !== req.user?.uid) {
+    if (!canAccessBuild(build, req)) {
       return res.status(403).json({ error: "Forbidden" });
     }
     const artifacts = await listArtifactRecords(req.params.id);
@@ -161,12 +159,7 @@ async function streamBuildById(req, res, next) {
       req,
       res,
       buildId,
-      (build) => !(
-        process.env.JWT_ENABLED === "true" &&
-        build.userId &&
-        req.user?.uid &&
-        build.userId !== req.user.uid
-      )
+      (build) => canAccessBuild(build, req)
     );
     if (!handled && !res.headersSent) {
       return res.status(404).json({ error: "Build not found" });
@@ -181,8 +174,10 @@ async function streamBuildById(req, res, next) {
 // ═══════════════════════════════════════════════════════════════
 async function listBuildsHandler(req, res, next) {
   try {
-    const limit = Math.min(Number(req.query.limit || 20), 100);
-    const userId = process.env.JWT_ENABLED === "true" ? req.user?.uid : null;
+    const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 100);
+    const jwtOn = process.env.JWT_ENABLED === "true";
+    if (jwtOn && !req.user?.uid) return res.json({ builds: [] });
+    const userId = jwtOn ? req.user.uid : null;
     const builds = await listBuilds({ limit, userId });
 
     res.json({
@@ -215,7 +210,7 @@ async function downloadBuild(req, res, next) {
       });
     }
 
-    if (process.env.JWT_ENABLED === "true" && build.userId && build.userId !== req.user?.uid) {
+    if (!canAccessBuild(build, req)) {
       return res.status(403).json({ error: "Forbidden" });
     }
 
