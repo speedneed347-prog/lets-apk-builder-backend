@@ -18,7 +18,8 @@ const fetch = require("node-fetch");
 const BUILD_ID = process.argv[2];
 const MODE = process.argv[3] || "install";
 const BACKEND_URL = process.env.BACKEND_URL;
-const SECRET = process.env.WEBHOOK_SECRET;
+// Must match backend getInternalSecret(): INTERNAL_API_SECRET first, WEBHOOK_SECRET as fallback
+const SECRET = process.env.INTERNAL_API_SECRET || process.env.WEBHOOK_SECRET;
 const PROJECT_ROOT = "android-project";
 
 if (!BUILD_ID || !BACKEND_URL || !SECRET) {
@@ -48,7 +49,8 @@ function findJavaDir(root) {
 async function fetchModuleList() {
   const url = `${BACKEND_URL}/api/internal/modules/${BUILD_ID}`;
   const res = await fetch(url, { headers: { "X-Internal-Secret": SECRET } });
-  if (!res.ok) return [];
+  // Do NOT swallow errors: returning [] on 401/500 silently drops the user's custom modules
+  if (!res.ok) throw new Error(`Module list fetch failed: HTTP ${res.status}`);
   const { modules } = await res.json();
   return modules || [];
 }
@@ -56,7 +58,8 @@ async function fetchModuleList() {
 async function fetchModuleZip(moduleId) {
   const url = `${BACKEND_URL}/api/internal/module/${BUILD_ID}/${moduleId}`;
   const res = await fetch(url, { headers: { "X-Internal-Secret": SECRET } });
-  if (!res.ok) return null;
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`Module ${moduleId} fetch failed: HTTP ${res.status}`);
   return res.json();
 }
 
