@@ -130,6 +130,7 @@ jobs:
           BUILD_ID: ${{ github.event.inputs.buildId }}
           BACKEND_URL: ${{ secrets.BACKEND_URL }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          INTERNAL_API_SECRET: ${{ secrets.INTERNAL_API_SECRET || secrets.WEBHOOK_SECRET }}
         run: |
           npm install --no-save node-fetch@2
           node scripts/install-custom-modules.js "$BUILD_ID" scan
@@ -162,6 +163,7 @@ jobs:
           BUILD_ID: ${{ github.event.inputs.buildId }}
           BACKEND_URL: ${{ secrets.BACKEND_URL }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          INTERNAL_API_SECRET: ${{ secrets.INTERNAL_API_SECRET || secrets.WEBHOOK_SECRET }}
         run: node scripts/install-custom-modules.js "$BUILD_ID"
 
       # ═══════════════════════════════════════════════════════════════
@@ -228,7 +230,7 @@ jobs:
           STEP_NAME: "Uploaded artifact to GitHub Releases"
           STEP_INDEX: "6"
           STATUS: "uploading"
-          LOG_LINE: "${ARTIFACT_FILENAME} → ${{ steps.upload.outputs.artifact_url }}"
+          LOG_LINE: "${{ env.ARTIFACT_FILENAME }} → ${{ steps.upload.outputs.artifact_url }}"
           ARTIFACT_FILENAME: ${{ env.ARTIFACT_FILENAME }}
           ARTIFACT_SHA256: ${{ env.ARTIFACT_SHA256 }}
           ARTIFACT_SIZE_BYTES: ${{ env.ARTIFACT_SIZE_BYTES }}
