@@ -30,7 +30,7 @@ const allowed = (process.env.CORS_ORIGINS || "*").split(",").map((s) => s.trim()
 app.use(cors({
   origin: (origin, cb) => {
     if (!origin || allowed.includes("*") || allowed.includes(origin)) return cb(null, true);
-    cb(new Error(`CORS blocked: ${origin}`));
+    cb(Object.assign(new Error(`CORS blocked: ${origin}`), { status: 403 }));
   },
   credentials: true,
 }));
