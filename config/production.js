@@ -24,6 +24,13 @@ function validateRuntimeConfig() {
     errors.push('JWT_SECRET(>=32 chars)');
   }
 
+  // Admin login (custom modules) — if enabled it must be fully configured
+  if (has(process.env.ADMIN_EMAIL) || has(process.env.ADMIN_PASSWORD)) {
+    if (!has(process.env.ADMIN_EMAIL)) errors.push('ADMIN_EMAIL');
+    if (!has(process.env.ADMIN_PASSWORD)) errors.push('ADMIN_PASSWORD');
+    if (!has(process.env.ADMIN_JWT_SECRET) || process.env.ADMIN_JWT_SECRET.length < 32) errors.push('ADMIN_JWT_SECRET(>=32 chars)');
+  }
+
   return { ok: errors.length === 0, errors };
 }
 
